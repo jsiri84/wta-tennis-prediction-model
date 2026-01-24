@@ -22,6 +22,7 @@ import re
 import joblib
 from collections import defaultdict
 from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.metrics import mean_absolute_error
@@ -393,7 +394,7 @@ class UnifiedPredictor:
     Unified tennis prediction model.
     
     Predicts spread and total games in a single consistent framework.
-    Win probability is derived from the spread prediction.
+    Win probability comes from the original prediction_model (better calibrated).
     """
     
     # Estimated prediction uncertainty (from validation)
@@ -403,6 +404,7 @@ class UnifiedPredictor:
     def __init__(self):
         self.spread_model = None
         self.total_model = None
+        self.winner_predictor = None  # Uses original TennisPredictor for calibrated probs
         self.spread_scaler = None
         self.total_scaler = None
         self.player_data = None
@@ -439,15 +441,24 @@ class UnifiedPredictor:
         self.name_lookup = save_data['name_lookup']
         self.SPREAD_STD = save_data.get('spread_std', 4.5)
         self.TOTAL_STD = save_data.get('total_std', 3.5)
+        
+        # Load the original winner predictor for calibrated win probabilities
+        from prediction_model import TennisPredictor
+        self.winner_predictor = TennisPredictor()
+        self.winner_predictor.train()  # Loads from its own cache
+        
         print("Unified model loaded from cache")
+        return True
     
     def train(self, force_retrain=False):
         """Train the unified model"""
         
         if not force_retrain and not self._needs_retrain():
             try:
-                self._load_model()
-                return
+                if self._load_model():
+                    return
+                else:
+                    print("Cache missing winner model, retraining...")
             except Exception as e:
                 print(f"Could not load cached model: {e}")
         
@@ -493,6 +504,11 @@ class UnifiedPredictor:
             n_estimators=200, max_depth=6, learning_rate=0.05, random_state=42
         )
         self.total_model.fit(X_total_scaled, y_total)
+        
+        # Load the original winner predictor (better calibrated probabilities)
+        from prediction_model import TennisPredictor
+        self.winner_predictor = TennisPredictor()
+        self.winner_predictor.train()
         
         # Calculate prediction uncertainty from training residuals
         spread_pred = self.spread_model.predict(X_spread_scaled)
@@ -634,6 +650,10 @@ class UnifiedPredictor:
         raw_spread = self.spread_model.predict(X_spread_scaled)[0]
         raw_total = self.total_model.predict(X_total_scaled)[0]
         
+        # Get win probability from the original winner predictor (better calibrated)
+        winner_result = self.winner_predictor.predict(player1, player2, surface)
+        win_prob = winner_result['player1']['win_prob'] / 100.0
+        
         # Apply consistency constraint:
         # loser_games = (total - |spread|) / 2 must be >= 0
         # winner_games = (total + |spread|) / 2 must be >= 12 (typical minimum)
@@ -667,17 +687,8 @@ class UnifiedPredictor:
             adjusted_total = abs_spread
             winner_games = abs_spread
         
-        # Derive win probability from spread
-        # Use a calibrated relationship between spread and win probability
-        # Based on empirical analysis: spread of 4 ≈ 75%, spread of 6 ≈ 85%, spread of 8 ≈ 92%
-        # Using logistic function for smooth probability mapping
-        
-        # Calibration: spread_factor controls how quickly prob approaches 0/1
-        # Higher factor = more extreme probabilities
-        spread_factor = 0.35  # Tuned for reasonable calibration
-        
-        # Logistic transformation: prob = 1 / (1 + exp(-spread * factor))
-        win_prob = 1 / (1 + np.exp(-raw_spread * spread_factor))
+        # Win probability comes from dedicated winner model (already calculated above)
+        # Clip to reasonable range
         win_prob = np.clip(win_prob, 0.02, 0.98)
         
         # Convert to odds
