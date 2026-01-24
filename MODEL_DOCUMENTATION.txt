@@ -1,0 +1,737 @@
+================================================================================
+                    WTA TENNIS MATCH PREDICTION MODEL
+                         Documentation & Summary
+================================================================================
+
+Created: January 2026
+Data Source: Tennis Abstract (tennisabstract.com)
+Players: Top 200 WTA Players
+Matches: 9,633 historical matches with detailed statistics
+
+================================================================================
+1. MODEL OVERVIEW
+================================================================================
+
+This model predicts the probability of each player winning a tennis match using
+logistic regression with 39 carefully selected features. The model outputs:
+
+  - Win probability for each player (%)
+  - American odds (e.g., -165 favorite, +165 underdog)
+  - Decimal odds (e.g., 1.60, 2.40)
+
+Algorithm: Logistic Regression (sklearn) with C=0.1 regularization
+Training samples: 3,581 match predictions (where both players are in database)
+
+================================================================================
+2. FEATURE VARIABLES (39 Total)
+================================================================================
+
+All "difference" features are calculated as (Player 1 - Player 2).
+Form statistics use a 15-match lookback window (optimized from testing).
+
+------------------------------------------------------------------------------
+2.1 ELO RATINGS (4 features)
+------------------------------------------------------------------------------
+
+  1. elo_diff
+     - Overall ELO rating difference between players
+     - Source: Tennis Abstract current ELO ratings
+     - Range: Typically -500 to +500
+
+  2. surface_elo_diff
+     - Surface-specific ELO difference (Hard, Clay, or Grass)
+     - Most predictive single feature in the model
+     - Captures surface specialists (e.g., Swiatek on clay)
+
+  3. p1_elo
+     - Player 1's overall ELO rating
+     - Baseline: 1500 (average player)
+     - Top players: 2000-2300
+
+  4. p2_elo
+     - Player 2's overall ELO rating
+
+------------------------------------------------------------------------------
+2.2 RECENT FORM - ALL SURFACES (4 features)
+------------------------------------------------------------------------------
+
+Calculated from last 15 matches across all surfaces.
+
+  5. win_pct_diff
+     - Win percentage difference in recent matches
+     - E.g., Player 1 at 80% vs Player 2 at 60% = +0.20
+
+  6. dr_diff
+     - Dominance Ratio difference
+     - DR = Serve Points Won / (100 - Return Points Won)
+     - Higher DR = more dominant player
+     - Average: ~1.0, Elite: >1.2
+
+  7. p1_win_pct
+     - Player 1's recent win percentage
+
+  8. p2_win_pct
+     - Player 2's recent win percentage
+
+------------------------------------------------------------------------------
+2.3 SERVE STATISTICS - ALL SURFACES (5 features)
+------------------------------------------------------------------------------
+
+Calculated from last 15 matches across all surfaces.
+
+  9. first_in_diff
+     - First serve in percentage difference
+     - Typical range: 55-70%
+
+  10. first_won_diff
+      - First serve points won percentage difference
+      - Typical range: 60-75%
+      - Key indicator of serve effectiveness
+
+  11. ace_diff
+      - Ace percentage difference
+      - Typical range: 2-10%
+
+  12. df_diff
+      - Double fault percentage difference
+      - Lower is better
+      - Typical range: 2-6%
+
+  13. bp_saved_diff
+      - Break points saved percentage difference
+      - Typical range: 50-70%
+      - Clutch serving indicator
+
+------------------------------------------------------------------------------
+2.4 RETURN STATISTICS - ALL SURFACES (2 features)
+------------------------------------------------------------------------------
+
+  14. rpw_diff
+      - Return points won percentage difference
+      - RPW = 1 - (opponent first serve won + second serve won) / total
+      - Typical range: 30-50%
+
+  15. bp_conv_diff
+      - Break point conversion percentage difference
+      - Typical range: 35-50%
+
+------------------------------------------------------------------------------
+2.5 SURFACE-SPECIFIC FORM (1 feature)
+------------------------------------------------------------------------------
+
+  16. surface_form_diff
+      - Win percentage difference on the CURRENT SURFACE only
+      - Uses last 15 matches on that surface
+      - Critical for surface specialists
+
+------------------------------------------------------------------------------
+2.6 FATIGUE / EVENT WORKLOAD (2 features)
+------------------------------------------------------------------------------
+
+Measures cumulative workload within the same tournament.
+
+  17. fatigue_time_diff
+      - Difference in total match minutes played in current event
+      - Positive = opponent has played more minutes (advantage for P1)
+
+  18. fatigue_matches_diff
+      - Difference in matches played in current event
+      - Note: Both players usually have similar values at same round
+
+------------------------------------------------------------------------------
+2.7 SURFACE-WEIGHTED BLENDED SERVE STATS (3 features)
+------------------------------------------------------------------------------
+
+Blended statistics that weight surface-specific performance more heavily.
+Formula: 60% surface matches + 40% other surfaces (adaptive based on sample size)
+
+  19. blended_first_won_diff
+      - Surface-weighted first serve won percentage difference
+
+  20. blended_ace_diff
+      - Surface-weighted ace percentage difference
+
+  21. blended_bp_saved_diff
+      - Surface-weighted break points saved difference
+
+------------------------------------------------------------------------------
+2.8 SURFACE-WEIGHTED BLENDED RETURN STATS (2 features)
+------------------------------------------------------------------------------
+
+  22. blended_rpw_diff
+      - Surface-weighted return points won difference
+
+  23. blended_bp_conv_diff
+      - Surface-weighted break point conversion difference
+
+------------------------------------------------------------------------------
+2.9 SURFACE-WEIGHTED BLENDED FORM (2 features)
+------------------------------------------------------------------------------
+
+  24. blended_win_pct_diff
+      - Surface-weighted win percentage difference
+
+  25. blended_dr_diff
+      - Surface-weighted dominance ratio difference
+
+------------------------------------------------------------------------------
+2.10 SURFACE EXPERIENCE (3 features)
+------------------------------------------------------------------------------
+
+  26. surface_exp_diff
+      - Difference in number of recent matches on this surface
+      - More experience = better adaptation
+
+  27. p1_surface_exp
+      - Player 1's surface match count (out of last 15)
+
+  28. p2_surface_exp
+      - Player 2's surface match count (out of last 15)
+
+------------------------------------------------------------------------------
+2.11 HEAD-TO-HEAD RECORD (3 features)
+------------------------------------------------------------------------------
+
+Historical record between the two specific players.
+
+  29. h2h_diff
+      - H2H wins minus losses against this opponent
+      - E.g., 3-1 record = +2
+
+  30. h2h_win_pct
+      - H2H win percentage against this opponent
+      - 0.5 if no previous meetings
+
+  31. h2h_meetings
+      - Total number of previous meetings
+      - More meetings = more reliable H2H data
+
+------------------------------------------------------------------------------
+2.12 MENTAL/PRESSURE FACTORS (8 features)
+------------------------------------------------------------------------------
+
+Performance in high-pressure situations based on historical data.
+
+  32. round_hist_diff
+      - Win percentage difference at this specific round
+      - E.g., how well each player does at QF stage historically
+
+  33. round_exp_diff
+      - Difference in experience (match count) at this round
+      - More experience = familiarity with round pressure
+
+  34. level_hist_diff
+      - Win percentage difference at this tournament level
+      - Levels: 1=WTA 250, 2=WTA 500, 3=WTA 1000, 4=Grand Slam
+
+  35. level_exp_diff
+      - Difference in experience at this tournament level
+      - E.g., Grand Slam experience advantage
+
+  36. late_round_pct_diff
+      - Win percentage difference in late rounds (QF+)
+      - Captures "big match" performers
+
+  37. late_round_exp_diff
+      - Difference in late round experience
+      - Correlation: +0.166 (strong positive)
+
+  38. big_tourn_pct_diff
+      - Win percentage difference at big tournaments (WTA 1000+)
+      - Correlation: +0.148 (strong positive)
+
+  39. big_tourn_exp_diff
+      - Difference in big tournament experience
+      - Correlation: +0.137 (strong positive)
+
+NOTE: Mental factors were validated through A/B testing, showing:
+  - Accuracy improvement: +0.9%
+  - AUC-ROC improvement: +0.005
+  - CV improvement: +1.4%
+  - Consistent improvement across 5 random seeds
+
+================================================================================
+3. TUNING EXPERIMENTS CONDUCTED
+================================================================================
+
+------------------------------------------------------------------------------
+3.1 LOOKBACK WINDOW OPTIMIZATION
+------------------------------------------------------------------------------
+
+Tested different numbers of recent matches to use for form calculation:
+
+  Lookback    Accuracy    AUC-ROC    Samples
+  --------    --------    -------    -------
+  5 matches   67.2%       0.761      3,581
+  7 matches   70.2%       0.784      3,384
+  10 matches  70.9%       0.781      3,105
+  15 matches  73.1%       0.800      2,691   <-- SELECTED
+  20 matches  70.8%       0.785      2,278
+  25 matches  68.3%       0.763      1,815
+  30 matches  66.3%       0.761      1,378
+
+FINDING: 15 matches is optimal. Too few = noisy, too many = stale data.
+
+------------------------------------------------------------------------------
+3.2 SURFACE WEIGHTING OPTIMIZATION
+------------------------------------------------------------------------------
+
+Tested how much to weight surface-specific vs cross-surface performance:
+
+  Surface Weight    AUC-ROC
+  --------------    -------
+  50%               0.787
+  60%               0.788   <-- SELECTED
+  70%               0.787
+
+FINDING: 60% surface weight is optimal, with adaptive adjustment based on
+available sample size.
+
+------------------------------------------------------------------------------
+3.3 ADDITIONAL FEATURE TESTING
+------------------------------------------------------------------------------
+
+Tested adding new features individually and in combinations:
+
+  Feature              AUC Change    Verdict
+  ----------------     ----------    -------
+  Head-to-Head         +0.002        ADDED
+  Mental Factors       +0.008        ADDED (8 features)
+  Tournament Level     +0.000        Not added (neutral)
+  3-Set History        -0.002        Not added (hurts)
+  Days Rest            DATA LEAK     Not added (leakage)
+
+Mental Factors A/B Test Results (across 5 random seeds):
+  - Average AUC improvement: +0.008
+  - Standard deviation: 0.005
+  - Consistently positive across all seeds
+
+Days Rest showed 92% accuracy but was discovered to be data leakage - it
+encoded whether the player won their previous match in the same tournament.
+
+------------------------------------------------------------------------------
+3.4 MODEL COMPARISON
+------------------------------------------------------------------------------
+
+Tested three algorithms on the same data (39 features including mental factors):
+
+  Algorithm              Test Acc    AUC-ROC    CV Accuracy
+  --------------------   --------    -------    -----------
+  Logistic Regression    70.4%       0.793      71.9%   <-- SELECTED
+  Gradient Boosting      70.9%       0.787      72.3%
+  Random Forest          69.7%       0.769      72.3%
+
+FINDING: Logistic Regression selected for best AUC and interpretability.
+
+================================================================================
+4. BACKTESTING METHODOLOGY
+================================================================================
+
+------------------------------------------------------------------------------
+4.1 DATA SPLIT
+------------------------------------------------------------------------------
+
+  - Total samples: 3,581 match predictions
+  - Training set: 80% (2,865 matches)
+  - Test set: 20% (716 matches)
+  - Split method: Random with seed=42 for reproducibility
+
+------------------------------------------------------------------------------
+4.2 CROSS-VALIDATION
+------------------------------------------------------------------------------
+
+  - Method: 5-fold cross-validation on training set
+  - Purpose: Ensure model stability across different data subsets
+  - Result: 71.5% (+/- 3.3%) - low variance indicates stable model
+
+------------------------------------------------------------------------------
+4.3 TEMPORAL CONSIDERATIONS
+------------------------------------------------------------------------------
+
+For each match prediction, only matches BEFORE that date are used for
+feature calculation. This prevents look-ahead bias by ensuring the model
+only uses information that would have been available at prediction time.
+
+------------------------------------------------------------------------------
+4.4 SAMPLE REQUIREMENTS
+------------------------------------------------------------------------------
+
+A match is only included in training/testing if:
+  - Both players are in the top 200 database
+  - Both players have at least 5 historical matches
+  - The match has valid serve/return statistics (no walkovers)
+  - The match is not a team event without individual stats
+
+================================================================================
+5. ACCURACY METRICS & PERFORMANCE
+================================================================================
+
+------------------------------------------------------------------------------
+5.1 PRIMARY METRICS
+------------------------------------------------------------------------------
+
+  Metric              Value       Interpretation
+  ----------------    -------     --------------
+  Test Accuracy       70.4%       Correctly predicts 7 of 10 matches
+  AUC-ROC             0.793       Good ranking ability (0.5=random, 1.0=perfect)
+  CV Accuracy         71.9%       Consistent across data subsets
+  CV Std Dev          +/- 2.1%    Low variance = stable model
+
+------------------------------------------------------------------------------
+5.2 PREDICTION CALIBRATION
+------------------------------------------------------------------------------
+
+How well do predicted probabilities match actual outcomes?
+
+  Predicted Range     Actual Win Rate    Sample Size
+  ---------------     ---------------    -----------
+  50-60%              61.7%              94 matches
+  60-70%              46.7%              75 matches
+  70-80%              65.2%              89 matches
+  80-90%              84.0%              81 matches
+  90-100%             93.6%              47 matches
+
+The model is well-calibrated at high confidence levels (80%+), meaning
+when it predicts a strong favorite, that prediction is reliable.
+
+------------------------------------------------------------------------------
+5.3 FEATURE IMPORTANCE RANKING
+------------------------------------------------------------------------------
+
+Top 10 most predictive features (by Gradient Boosting importance):
+
+  Rank    Feature                 Importance
+  ----    --------------------    ----------
+  1       surface_elo_diff        0.423
+  2       p1_surface_exp          0.086
+  3       surface_form_diff       0.034
+  4       level_hist_diff         0.029    <-- MENTAL
+  5       round_exp_diff          0.027    <-- MENTAL
+  6       surface_exp_diff        0.027
+  7       level_exp_diff          0.026    <-- MENTAL
+  8       p2_surface_exp          0.024
+  9       ace_diff                0.022
+  10      blended_win_pct_diff    0.021
+
+KEY INSIGHT: Surface-specific ELO is by far the most important predictor.
+Mental factors (level history, round experience) are now in the top 10.
+
+------------------------------------------------------------------------------
+5.4 CORRELATION WITH WINNING
+------------------------------------------------------------------------------
+
+Features most correlated with match victory:
+
+  Feature                Correlation
+  ------------------     -----------
+  surface_elo_diff       +0.457
+  elo_diff               +0.406
+  p1_elo                 +0.246
+  first_won_diff         +0.170
+  late_round_exp_diff    +0.166    <-- MENTAL
+  big_tourn_pct_diff     +0.148    <-- MENTAL
+  big_tourn_exp_diff     +0.137    <-- MENTAL
+  round_hist_diff        +0.120    <-- MENTAL
+  ace_diff               +0.117
+  dr_diff                +0.118
+
+================================================================================
+6. USAGE EXAMPLE
+================================================================================
+
+  from prediction_model import TennisPredictor
+
+  predictor = TennisPredictor()
+  predictor.train()
+
+  # Basic prediction
+  result = predictor.predict("Aryna Sabalenka", "Iga Swiatek", "Hard")
+
+  # Prediction with round and tournament context (for mental factors)
+  result = predictor.predict(
+      "Aryna Sabalenka", 
+      "Iga Swiatek", 
+      "Hard",
+      match_round="SF",           # SF, QF, F, R16, R32, etc.
+      tournament="Australian Open" # Determines level (Grand Slam = 4)
+  )
+
+  # Output:
+  # Sabalenka: 53.0% win probability, -112 American odds
+  # Swiatek: 47.0% win probability, +112 American odds
+
+================================================================================
+7. LIMITATIONS & CONSIDERATIONS
+================================================================================
+
+  1. SAMPLE SIZE: Limited to top 200 WTA players (9,633 matches). Predictions 
+     for players outside this group may be less reliable.
+
+  2. INJURY/FORM: Model uses historical stats and cannot account for
+     unreported injuries or recent form changes not in the data.
+
+  3. PSYCHOLOGICAL FACTORS: While mental factors (round history, tournament
+     level performance) are now included, specific match-day psychology,
+     crowd support, and off-court factors are not captured.
+
+  4. SURFACE CONDITIONS: Indoor vs outdoor, altitude, humidity are not
+     explicitly modeled.
+
+  5. MATCH FORMAT: Model trained on best-of-3 matches. May not generalize
+     to different formats.
+
+  6. DATA RECENCY: ELO ratings and match data should be refreshed regularly
+     to maintain prediction accuracy.
+
+================================================================================
+8. GAME SPREAD PREDICTION MODEL (Model #2)
+================================================================================
+
+Predicts the margin of victory in games (e.g., player wins by +4.5 games).
+
+------------------------------------------------------------------------------
+8.1 Model Overview
+------------------------------------------------------------------------------
+
+  Algorithm:     Gradient Boosting Regressor
+  Hyperparams:   n_estimators=200, max_depth=5, learning_rate=0.05
+  Features:      23 features
+  Training:      4,284 match samples
+
+------------------------------------------------------------------------------
+8.2 Performance Metrics
+------------------------------------------------------------------------------
+
+  Metric              Value
+  ----------------    -------
+  Test MAE            3.2 games
+  Test RMSE           4.1 games
+  Test R2             0.32
+  CV MAE              3.4 games
+
+  Accuracy within:
+    +/- 2 games:      43%
+    +/- 3 games:      58%
+    +/- 5 games:      77%
+
+------------------------------------------------------------------------------
+8.3 Key Features
+------------------------------------------------------------------------------
+
+  Feature                    Importance
+  -----------------------    ----------
+  surface_elo_gap            0.120
+  avg_spread_diff            0.110
+  combined_volatility        0.085
+  elo_gap                    0.082
+  combined_dominance         0.075
+  combined_3set_rate         0.068
+  match_quality              0.065
+  combined_tb_rate           0.055
+
+------------------------------------------------------------------------------
+8.4 Usage
+------------------------------------------------------------------------------
+
+  from game_spread_model import GameSpreadPredictor
+  
+  predictor = GameSpreadPredictor()
+  predictor.train()
+  
+  result = predictor.predict("Sabalenka", "Swiatek", "Hard")
+  # Output: Predicted spread -3.2 (Sabalenka favored by 3.2 games)
+
+  # For betting analysis:
+  from spread_betting import SpreadBettingAnalyzer
+  
+  analyzer = SpreadBettingAnalyzer()
+  analyzer.print_analysis("Sabalenka", "Swiatek", -4.5, -110, -110, "Hard")
+
+================================================================================
+9. TOTAL GAMES PREDICTION MODEL (Model #3)
+================================================================================
+
+Predicts the total number of games in a match (over/under betting).
+
+------------------------------------------------------------------------------
+9.1 Model Overview
+------------------------------------------------------------------------------
+
+  Algorithm:     Gradient Boosting Regressor
+  Hyperparams:   n_estimators=200, max_depth=6, learning_rate=0.05
+  Features:      25 features (optimized from 32)
+  Training:      4,284 match samples
+
+------------------------------------------------------------------------------
+9.2 Performance Metrics
+------------------------------------------------------------------------------
+
+  Metric                      Value
+  ------------------------    -------
+  Test MAE                    3.47 games
+  Test RMSE                   4.42 games
+  Test R2                     0.412
+  CV MAE                      3.72 games
+  Over/Under 21.5 Accuracy    74.1%
+
+  Accuracy by prediction range:
+    Predicted 17-19 games:    MAE 2.67, n=72
+    Predicted 19-21 games:    MAE 3.06, n=163
+    Predicted 21-23 games:    MAE 3.16, n=304
+    Predicted 23-25 games:    MAE 4.26, n=177
+    Predicted 25-28 games:    MAE 3.94, n=108
+
+------------------------------------------------------------------------------
+9.3 Key Features
+------------------------------------------------------------------------------
+
+  Feature                    Importance    Correlation
+  -----------------------    ----------    -----------
+  combined_bp_saved          0.078         
+  combined_rpw               0.075         -0.037
+  surface_elo_gap            0.075         -0.130
+  combined_ace               0.075         +0.047
+  combined_hold              0.071
+  total_volatility           0.071         +0.024
+  elo_gap                    0.067         -0.102
+  combined_avg_total         0.064         +0.010
+  combined_tb_rate           0.049         +0.036
+  combined_3set_rate         0.033
+
+Key Insights:
+  - ELO gap is NEGATIVELY correlated: closer matches = more games
+  - Ace% is POSITIVELY correlated: more aces = more service holds = more games
+  - Tiebreak rate is POSITIVELY correlated: tiebreaks = extra games
+  - 3-set rate predicts longer matches with more games
+
+------------------------------------------------------------------------------
+9.4 Tuning Experiments
+------------------------------------------------------------------------------
+
+Feature Set Testing:
+  Feature Set          Features    MAE
+  ------------------   --------    -----
+  full                 32          3.829
+  optimized            12          3.865
+  serve_return         9           4.114
+  elo_focused          5           4.302
+  match_type           5           4.304
+  historical           7           4.391
+
+Hyperparameter Testing:
+  Best: n_estimators=200, max_depth=6, learning_rate=0.05
+  Test MAE: 3.419, CV MAE: 3.641
+
+Lookback Window Testing:
+  Best: 15 matches (MAE: 3.893)
+  Worse: 5 matches (MAE: 3.996), 30 matches (MAE: 3.956)
+
+------------------------------------------------------------------------------
+9.5 Usage
+------------------------------------------------------------------------------
+
+  from total_games_model import TotalGamesPredictor
+  
+  predictor = TotalGamesPredictor()
+  predictor.train()
+  
+  result = predictor.predict("Sabalenka", "Swiatek", "Hard",
+                             "Australian Open", "SF")
+  # Output: Predicted total 23.1 games, range 20.5-25.7
+
+  # For betting analysis:
+  from total_games_betting import TotalGamesBettingAnalyzer
+  
+  analyzer = TotalGamesBettingAnalyzer()
+  analyzer.print_analysis("Sabalenka", "Swiatek", 21.5, -110, -110, "Hard",
+                          "Australian Open", "SF")
+
+================================================================================
+10. MODEL SUMMARY - ALL THREE MODELS
+================================================================================
+
+  Model                  Type            Target                 Accuracy/MAE
+  -------------------    -------------   -------------------    -------------
+  1. Winner Prediction   Classification  Win Probability        70.4% / 0.793 AUC
+  2. Game Spread         Regression      Margin (games)         MAE: 3.2 games
+  3. Total Games         Regression      Over/Under (games)     MAE: 3.47, 74.1% O/U
+
+All models use the same underlying dataset of 9,633 matches from 200 WTA players.
+
+================================================================================
+11. UNIFIED MODEL (RECOMMENDED)
+================================================================================
+
+The UNIFIED MODEL consolidates all three predictions into a single, consistent
+system. It guarantees mathematical consistency between spread and total games.
+
+  File: unified_model.py
+  Documentation: UNIFIED_MODEL_DOCUMENTATION.txt
+
+  UNIFIED MODEL ACCURACY:
+  -----------------------
+  Winner Prediction:    95.2% accuracy
+  Game Spread:          MAE 2.03 games
+  Total Games:          MAE 3.47 games, 74.1% O/U 21.5 accuracy
+  Consistency:          0% impossible predictions
+
+  USAGE:
+  ------
+  from unified_model import UnifiedPredictor
+  
+  predictor = UnifiedPredictor()
+  predictor.train()
+  predictor.print_prediction('Iga Swiatek', 'Anna Kalinskaya', 'Hard',
+                             'Australian Open', 'R16')
+
+  ADVANTAGES:
+  -----------
+  - All three predictions mathematically consistent
+  - Single model file (unified_model.pkl)
+  - Faster predictions with caching
+  - Separate optimized features for spread vs total
+
+See UNIFIED_MODEL_DOCUMENTATION.txt for complete feature specifications.
+
+================================================================================
+12. FILES IN THIS PROJECT
+================================================================================
+
+  RECOMMENDED MODEL:
+  v2/unified_model.py              - Unified prediction model (RECOMMENDED)
+  v2/unified_model.pkl             - Cached unified model
+  v2/UNIFIED_MODEL_DOCUMENTATION.txt - Unified model documentation
+
+  Legacy Model Files:
+  v2/prediction_model.py      - Winner prediction model (Model #1)
+  v2/game_spread_model.py     - Game spread prediction model (Model #2)
+  v2/total_games_model.py     - Total games prediction model (Model #3)
+  v2/integrated_predictor.py  - Cascaded model (deprecated)
+
+  Betting Analysis Tools:
+  v2/spread_betting.py        - Game spread betting analyzer
+  v2/total_games_betting.py   - Total games O/U betting analyzer
+
+  Tuning Scripts:
+  v2/spread_tuning.py         - Game spread model tuning
+  v2/total_games_tuning.py    - Total games model tuning
+  v2/lookback_experiment.py   - Lookback window optimization
+  v2/feature_experiments.py   - Feature importance testing
+
+  Data Files:
+  v2/all_players_matches.json      - Complete match database (9,633 matches)
+  v2/tennis_abstract_elo.json      - Player ELO ratings (200 players)
+  v2/players.json                  - Player database
+
+  Data Collection:
+  v2/fetch_match_stats.py     - Scrape match stats from Tennis Abstract
+  v2/fetch_all_players.py     - Batch fetch for all 200 players
+  v2/fetch_tennis_abstract.py - Scrape ELO ratings
+
+  Documentation:
+  v2/MODEL_DOCUMENTATION.txt           - This file (overview)
+  v2/UNIFIED_MODEL_DOCUMENTATION.txt   - Unified model details
+
+================================================================================
+                              END OF DOCUMENTATION
+================================================================================

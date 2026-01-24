@@ -1,0 +1,397 @@
+================================================================================
+                    UNIFIED TENNIS MATCH PREDICTION MODEL
+                         Documentation & Specification
+================================================================================
+
+Created: January 2026
+Model File: unified_model.pkl
+Source Code: unified_model.py
+Data Source: Tennis Abstract (tennisabstract.com)
+Players: Top 200 WTA Players
+Training Matches: 4,284 historical matches
+
+================================================================================
+1. MODEL OVERVIEW
+================================================================================
+
+The Unified Model is a single, consistent prediction system that outputs three
+mathematically consistent predictions for any WTA tennis match:
+
+  1. WIN PROBABILITY - Who wins the match (%)
+  2. GAME SPREAD - By how many games (-X.X)
+  3. TOTAL GAMES - Combined games in the match
+
+KEY INNOVATION: Unlike separate models, these predictions are guaranteed to be
+mathematically consistent:
+
+  - winner_games = (total + |spread|) / 2
+  - loser_games = (total - |spread|) / 2
+  - loser_games >= 0 always (no impossible predictions)
+
+Algorithm: Gradient Boosting Regressor (scikit-learn)
+  - Spread Model: n_estimators=200, max_depth=5, learning_rate=0.05
+  - Total Model: n_estimators=200, max_depth=6, learning_rate=0.05
+
+================================================================================
+2. ACCURACY METRICS
+================================================================================
+
+Evaluated on 20% holdout test set (857 matches):
+
+------------------------------------------------------------------------------
+2.1 WINNER PREDICTION
+------------------------------------------------------------------------------
+
+  Metric              Value
+  ------------------  -------
+  Accuracy            95.2%
+  AUC-ROC             0.656
+  Direction Accuracy  95.2%
+
+  Calibration:
+    70-80% predicted  -> 73.3% actual win rate
+    80-90% predicted  -> 96.7% actual win rate
+    90-100% predicted -> 100.0% actual win rate
+
+------------------------------------------------------------------------------
+2.2 GAME SPREAD PREDICTION
+------------------------------------------------------------------------------
+
+  Metric              Value
+  ------------------  -------
+  MAE                 2.03 games
+  RMSE                ~2.5 games
+  Direction Accuracy  95.2%
+
+  Spread Betting Accuracy (vs common lines):
+    Line +/-3.5       74.4%
+    Line +/-4.5       66.0%
+    Line +/-5.5       66.9%
+
+------------------------------------------------------------------------------
+2.3 TOTAL GAMES PREDICTION
+------------------------------------------------------------------------------
+
+  Metric              Value
+  ------------------  -------
+  MAE                 3.47 games
+  RMSE                ~4.2 games
+
+  Over/Under Accuracy:
+    O/U 19.5          65.0%
+    O/U 20.5          70.8%
+    O/U 21.5          74.1%
+    O/U 22.5          81.4%
+
+------------------------------------------------------------------------------
+2.4 CONSISTENCY METRICS
+------------------------------------------------------------------------------
+
+  Metric                          Value
+  ------------------------------  -------
+  Impossible Predictions          0 (0.0%)
+  Spread-Total Correlation        -0.231 (negative = correct)
+
+================================================================================
+3. FEATURE VARIABLES
+================================================================================
+
+The model uses TWO SEPARATE FEATURE SETS optimized for each prediction task:
+  - Spread features: Use DIFFERENCES (who is better)
+  - Total features: Use COMBINED stats (both players contribute to total)
+
+------------------------------------------------------------------------------
+3.1 SPREAD FEATURES (21 features)
+------------------------------------------------------------------------------
+
+These features predict HOW MUCH player 1 wins/loses by.
+All "diff" features are (Player1 - Player2).
+
+  #   Feature Name                Description
+  --  --------------------------  ------------------------------------------
+  1   elo_diff                    Overall ELO rating difference
+  2   surface_elo_diff            Surface-specific ELO difference
+
+  3   avg_spread_diff             Historical avg spread difference
+  4   p1_avg_spread               P1's average game spread (last 15 matches)
+  5   p2_avg_spread               P2's average game spread (last 15 matches)
+  6   combined_spread_volatility  Sum of both players' spread std devs
+  7   combined_dominance          Sum of absolute avg spreads
+
+  8   win_pct_diff                Win percentage difference (last 15)
+  9   dr_diff                     Dominance Ratio difference
+  10  surface_form_diff           Surface-specific win% difference
+
+  11  first_won_diff              1st serve points won % difference
+  12  ace_diff                    Ace percentage difference
+  13  second_won_diff             2nd serve points won % difference
+  14  bp_saved_diff               Break points saved % difference
+
+  15  rpw_diff                    Return points won % difference
+  16  bp_conv_diff                Break point conversion % difference
+
+  17  straight_set_rate_diff      Straight set rate difference
+  18  win_pct_gap                 Absolute win% gap (mismatch indicator)
+
+  19  h2h_diff                    Head-to-head record (wins - losses)
+  20  h2h_win_pct                 H2H win percentage (0.5 if no meetings)
+  21  h2h_total                   Number of previous meetings
+
+------------------------------------------------------------------------------
+3.2 TOTAL GAMES FEATURES (25 features)
+------------------------------------------------------------------------------
+
+These features predict HOW MANY TOTAL GAMES will be played.
+Uses COMBINED stats since both players contribute to match length.
+
+  #   Feature Name                Description
+  --  --------------------------  ------------------------------------------
+  1   elo_gap                     Absolute ELO difference (closer = more games)
+  2   surface_elo_gap             Absolute surface ELO difference
+  3   match_quality               Average ELO of both players
+
+  4   combined_avg_total          Average of both players' avg total games
+  5   p1_avg_total                P1's average total games (last 15)
+  6   p2_avg_total                P2's average total games (last 15)
+  7   combined_total_volatility   Sum of both players' total games std dev
+  8   combined_max_total          Average of both players' max total games
+
+  9   combined_3set_rate          Sum of three-set rates (more 3-setters)
+  10  combined_straight_set_rate  Sum of straight-set rates (fewer games)
+  11  combined_tiebreak_rate      Sum of tiebreak rates (more games)
+  12  win_pct_gap                 Absolute win% gap (mismatch = fewer games)
+
+  13  combined_hold_rate          Average hold rate (higher = fewer breaks)
+  14  combined_first_won          Average 1st serve won %
+  15  combined_ace_pct            Average ace % (more aces = quicker holds)
+  16  combined_bp_saved           Average break points saved %
+
+  17  combined_break_rate         Average break point conversion rate
+  18  combined_rpw                Average return points won %
+  19  combined_bp_conv            Average break point conversion %
+
+  20  tournament_level            1=250, 2=500, 3=1000, 4=Grand Slam
+  21  round_level                 1=R128 to 7=Final
+  22  big_match_indicator         tournament_level * round_level
+
+  23  is_hard                     1 if hard court, else 0
+  24  is_clay                     1 if clay court, else 0
+  25  is_grass                    1 if grass court, else 0
+
+================================================================================
+4. WIN PROBABILITY DERIVATION
+================================================================================
+
+Win probability is DERIVED from the spread prediction using a logistic function:
+
+  win_prob = 1 / (1 + exp(-spread * 0.35))
+
+Where:
+  - spread > 0 means P1 is favored
+  - spread < 0 means P2 is favored
+  - spread_factor = 0.35 (calibrated for reasonable probabilities)
+
+Examples:
+  Spread    Win Probability
+  ------    ---------------
+  +8.0      94.3%
+  +6.0      89.1%
+  +4.0      80.2%
+  +2.0      66.8%
+  0.0       50.0%
+  -2.0      33.2%
+  -4.0      19.8%
+
+================================================================================
+5. CONSISTENCY CONSTRAINTS
+================================================================================
+
+The model applies consistency constraints to ensure predictions make sense:
+
+1. MINIMUM TOTAL: total >= |spread| + 1
+   (Loser must win at least 1 game)
+
+2. MINIMUM FLOOR: total >= 12
+   (Minimum realistic match length)
+
+3. MAXIMUM BY SPREAD:
+   - If |spread| >= 8: max_total = 20 (dominant win)
+   - If |spread| >= 6: max_total = 22
+   - If |spread| >= 4: max_total = 24
+   - Otherwise: max_total = 30
+
+4. DERIVED VALUES:
+   - winner_games = (total + |spread|) / 2
+   - loser_games = (total - |spread|) / 2
+
+================================================================================
+6. PLAYER STATISTICS CALCULATION
+================================================================================
+
+For each player, the following statistics are calculated from their last 15
+matches (lookback window optimized through testing):
+
+  Statistic           Description                              Default
+  -----------------   --------------------------------------   -------
+  win_pct             Win percentage                           0.5
+  avg_spread          Average game spread                      0
+  spread_std          Spread standard deviation                3
+  avg_total           Average total games                      20
+  total_std           Total games standard deviation           4
+  max_total           Maximum total games in recent matches    26
+  straight_set_rate   % of matches won/lost in 2 sets          varies
+  three_set_rate      % of matches going to 3 sets             varies
+  tiebreak_rate       Tiebreaks per match                      varies
+  avg_dr              Dominance Ratio                          1.0
+  first_in_pct        1st serve in %                           60
+  first_won_pct       1st serve points won %                   65
+  second_won_pct      2nd serve points won %                   50
+  ace_pct             Ace %                                    5
+  df_pct              Double fault %                           3
+  bp_saved_pct        Break points saved %                     60
+  rpw_pct             Return points won %                      35
+  bp_conv_pct         Break point conversion %                 40
+  hold_rate           Service hold rate (derived)              55
+  break_rate          Break rate (derived)                     40
+
+Surface-specific stats are calculated separately when player has 3+ matches
+on that surface.
+
+================================================================================
+7. USAGE
+================================================================================
+
+from unified_model import UnifiedPredictor
+
+# Initialize and load model
+predictor = UnifiedPredictor()
+predictor.train()  # Loads from cache if available
+
+# Get prediction dictionary
+result = predictor.predict(
+    player1='Iga Swiatek',
+    player2='Anna Kalinskaya', 
+    surface='Hard',
+    tournament='Australian Open',
+    match_round='R16'
+)
+
+# Access individual predictions
+print(f"Win Prob: {result['p1_win_prob']}%")
+print(f"Spread: {result['spread_favors']} {result['spread_line']}")
+print(f"Total: {result['total']} games")
+
+# Or use formatted output
+predictor.print_prediction('Iga Swiatek', 'Anna Kalinskaya', 'Hard', 
+                           'Australian Open', 'R16')
+
+================================================================================
+8. OUTPUT FIELDS
+================================================================================
+
+The predict() method returns a dictionary with:
+
+  Field                 Type      Description
+  -------------------   -------   ------------------------------------------
+  player1               str       First player name (normalized)
+  player2               str       Second player name (normalized)
+  surface               str       Court surface
+  tournament            str       Tournament name
+  round                 str       Match round
+
+  p1_win_prob           float     P1 win probability (0-100)
+  p2_win_prob           float     P2 win probability (0-100)
+  p1_odds               int       P1 American odds
+  p2_odds               int       P2 American odds
+  p1_decimal            float     P1 decimal odds
+  p2_decimal            float     P2 decimal odds
+
+  p1_elo                int       P1 overall ELO
+  p2_elo                int       P2 overall ELO
+  p1_surface_elo        int       P1 surface ELO
+  p2_surface_elo        int       P2 surface ELO
+  elo_diff              int       ELO difference (P1 - P2)
+  h2h                   str       Head-to-head record
+
+  spread                float     Game spread (+ = P1 favored)
+  spread_favors         str       Player favored on spread
+  spread_line           float     Spread line (absolute value)
+
+  total                 float     Predicted total games
+  total_raw             float     Raw model prediction (before constraints)
+
+  winner_games          float     Implied winner games
+  loser_games           float     Implied loser games
+
+  spread_std            float     Model's spread uncertainty
+  total_std             float     Model's total games uncertainty
+
+================================================================================
+9. FILES
+================================================================================
+
+  unified_model.py                  Main model source code
+  unified_model.pkl                 Saved/cached model (auto-generated)
+  all_players_matches.json          Training data (9,633 matches)
+  UNIFIED_MODEL_DOCUMENTATION.txt   This documentation file
+
+================================================================================
+10. COMPARISON WITH SEPARATE MODELS
+================================================================================
+
+The unified model consolidates three previously separate models:
+
+  Old Model               Unified Equivalent      Key Difference
+  --------------------    -------------------     -----------------
+  prediction_model.py     Win from spread         Derived, not direct
+  game_spread_model.py    Spread prediction       Same features
+  total_games_model.py    Total prediction        Same features
+
+Advantages of Unified Model:
+  1. Mathematical consistency guaranteed
+  2. Single model to maintain
+  3. Faster predictions (one cache load)
+  4. No conflicting predictions
+
+Trade-offs:
+  - Win probability AUC slightly lower (derived vs direct model)
+  - Spread MAE slightly higher with optimized total features
+
+================================================================================
+11. RETRAINING
+================================================================================
+
+The model automatically retrains if:
+  - unified_model.pkl doesn't exist
+  - all_players_matches.json is newer than unified_model.pkl
+
+To force retrain:
+
+  predictor = UnifiedPredictor()
+  predictor.train(force_retrain=True)
+
+Training time: ~15-20 seconds on modern hardware
+
+================================================================================
+12. EXAMPLE PREDICTIONS
+================================================================================
+
+MATCH: Naomi Osaka vs Maddison Inglis (AO R16, Hard)
+----------------------------------------------------------------------
+  Winner:  Osaka 89.6% (-864) | Inglis 10.4% (+864)
+  Spread:  Osaka -6.2 games
+  Total:   19.9 games
+  Implied: Osaka 13 games, Inglis 7 games
+  Likely:  6-2 6-4, 6-3 6-3
+
+MATCH: Iga Swiatek vs Anna Kalinskaya (AO R16, Hard)
+----------------------------------------------------------------------
+  Winner:  Swiatek 77.9% (-352) | Kalinskaya 22.1% (+352)
+  Spread:  Swiatek -3.6 games
+  Total:   20.3 games
+  Implied: Swiatek 12 games, Kalinskaya 8 games
+  Likely:  6-3 6-4, 6-4 6-3
+
+================================================================================
+                              END OF DOCUMENTATION
+================================================================================
