@@ -229,6 +229,81 @@ def calculate_head_to_head(matches, opponent_name):
     }
 
 
+# ============================================================
+# ELO-LEVEL ADJUSTED FEATURES (NEW)
+# ============================================================
+
+def calculate_vs_strong_opponents(matches, player_data, name_lookup, strong_threshold=1900, lookback=20):
+    """Win rate against strong opponents (ELO > threshold)"""
+    recent = matches[:lookback]
+    wins_vs_strong = 0
+    matches_vs_strong = 0
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if opp_key and opp_key in player_data:
+            opp_elo = player_data[opp_key].get('elo_overall', 1500)
+            if opp_elo >= strong_threshold:
+                matches_vs_strong += 1
+                if match.get('result') == 'W':
+                    wins_vs_strong += 1
+    
+    return {
+        'win_pct_vs_strong': wins_vs_strong / matches_vs_strong if matches_vs_strong > 0 else 0.5,
+        'matches_vs_strong': matches_vs_strong
+    }
+
+
+def calculate_elo_adjusted_form(matches, player_data, name_lookup, lookback=15):
+    """Opponent-adjusted form - weights wins by opponent ELO"""
+    recent = matches[:lookback]
+    weighted_wins = 0
+    total_weight = 0
+    opponent_elos = []
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if opp_key and opp_key in player_data:
+            opp_elo = player_data[opp_key].get('elo_overall', 1500)
+            opponent_elos.append(opp_elo)
+            weight = opp_elo / 1800
+            total_weight += weight
+            if match.get('result') == 'W':
+                weighted_wins += weight
+    
+    return {
+        'adjusted_win_pct': weighted_wins / total_weight if total_weight > 0 else 0.5,
+        'avg_opponent_elo': np.mean(opponent_elos) if opponent_elos else 1700
+    }
+
+
+def calculate_level_jump(matches, player_data, name_lookup, current_opponent_elo, lookback=10):
+    """Level jump - how much harder is current opponent vs recent"""
+    recent = matches[:lookback]
+    opponent_elos = []
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if opp_key and opp_key in player_data:
+            opp_elo = player_data[opp_key].get('elo_overall', 1500)
+            opponent_elos.append(opp_elo)
+    
+    avg_recent_opp_elo = np.mean(opponent_elos) if opponent_elos else 1700
+    level_jump = current_opponent_elo - avg_recent_opp_elo
+    
+    return {
+        'level_jump': level_jump,
+        'level_jump_pct': level_jump / avg_recent_opp_elo if avg_recent_opp_elo > 0 else 0,
+        'avg_recent_opp_elo': avg_recent_opp_elo
+    }
+
+
 def build_training_data(data):
     """Build training dataset from historical matches"""
     
@@ -319,6 +394,14 @@ def build_training_data(data):
             # Head-to-head record
             p1_h2h = calculate_head_to_head(historical_matches, opp_name)
             
+            # ELO-level adjusted features (NEW)
+            p1_vs_strong = calculate_vs_strong_opponents(historical_matches, player_data, name_lookup)
+            p2_vs_strong = calculate_vs_strong_opponents(opp_historical, player_data, name_lookup)
+            p1_adj = calculate_elo_adjusted_form(historical_matches, player_data, name_lookup)
+            p2_adj = calculate_elo_adjusted_form(opp_historical, player_data, name_lookup)
+            p1_jump = calculate_level_jump(historical_matches, player_data, name_lookup, opp_data['elo_overall'])
+            p2_jump = calculate_level_jump(opp_historical, player_data, name_lookup, pdata['elo_overall'])
+            
             # Build feature vector
             features = [
                 # ELO features
@@ -374,6 +457,19 @@ def build_training_data(data):
                 p1_h2h['diff'],      # H2H record difference (wins - losses)
                 p1_h2h['win_pct'],   # H2H win percentage
                 p1_h2h['total'],     # Number of previous meetings
+                
+                # === ELO-LEVEL ADJUSTED FEATURES (NEW) ===
+                # Option 1: Performance vs strong opponents
+                p1_vs_strong['win_pct_vs_strong'] - p2_vs_strong['win_pct_vs_strong'],
+                p1_vs_strong['matches_vs_strong'] - p2_vs_strong['matches_vs_strong'],
+                
+                # Option 2: ELO-adjusted form (weights wins by opponent strength)
+                p1_adj['adjusted_win_pct'] - p2_adj['adjusted_win_pct'],
+                p1_adj['avg_opponent_elo'] - p2_adj['avg_opponent_elo'],
+                
+                # Option 3: Level jump (facing tougher competition than usual?)
+                p1_jump['level_jump'] - p2_jump['level_jump'],
+                p1_jump['level_jump_pct'] - p2_jump['level_jump_pct'],
             ]
             
             # Label
@@ -426,7 +522,11 @@ def train_and_evaluate():
         # Surface experience (3)
         'surface_exp_diff', 'p1_surface_exp', 'p2_surface_exp',
         # Head-to-head (3)
-        'h2h_diff', 'h2h_win_pct', 'h2h_meetings'
+        'h2h_diff', 'h2h_win_pct', 'h2h_meetings',
+        # ELO-level adjusted (6) - NEW
+        'vs_strong_win_pct_diff', 'vs_strong_matches_diff',
+        'adj_form_win_pct_diff', 'avg_opp_elo_diff',
+        'level_jump_diff', 'level_jump_pct_diff'
     ]
     
     # Split data
@@ -754,6 +854,14 @@ class TennisPredictor:
         p2_blend = calculate_blended_stats(p2_matches, surface, 15, 0.6)
         p1_h2h = calculate_head_to_head(p1_matches, p2_name)
         
+        # ELO-level adjusted features (NEW)
+        p1_vs_strong = calculate_vs_strong_opponents(p1_matches, self.player_data, self.name_lookup)
+        p2_vs_strong = calculate_vs_strong_opponents(p2_matches, self.player_data, self.name_lookup)
+        p1_adj = calculate_elo_adjusted_form(p1_matches, self.player_data, self.name_lookup)
+        p2_adj = calculate_elo_adjusted_form(p2_matches, self.player_data, self.name_lookup)
+        p1_jump = calculate_level_jump(p1_matches, self.player_data, self.name_lookup, p2_data['elo_overall'])
+        p2_jump = calculate_level_jump(p2_matches, self.player_data, self.name_lookup, p1_data['elo_overall'])
+        
         if not all([p1_form, p2_form, p1_blend, p2_blend]):
             raise ValueError("Not enough match data for prediction")
         
@@ -790,6 +898,13 @@ class TennisPredictor:
             p1_h2h['diff'],
             p1_h2h['win_pct'],
             p1_h2h['total'],
+            # ELO-level adjusted features (NEW)
+            p1_vs_strong['win_pct_vs_strong'] - p2_vs_strong['win_pct_vs_strong'],
+            p1_vs_strong['matches_vs_strong'] - p2_vs_strong['matches_vs_strong'],
+            p1_adj['adjusted_win_pct'] - p2_adj['adjusted_win_pct'],
+            p1_adj['avg_opponent_elo'] - p2_adj['avg_opponent_elo'],
+            p1_jump['level_jump'] - p2_jump['level_jump'],
+            p1_jump['level_jump_pct'] - p2_jump['level_jump_pct'],
         ]
         
         # Scale and predict

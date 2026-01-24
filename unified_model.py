@@ -212,6 +212,159 @@ def get_round_level(round_str):
     return round_map.get(round_str, 3)
 
 
+# ============================================================
+# ELO-LEVEL ADJUSTED FEATURES (NEW)
+# ============================================================
+
+def calculate_vs_strong_opponents(matches, player_data, name_lookup, strong_threshold=1900, lookback=20):
+    """
+    Option 1: Win rate against strong opponents (ELO > threshold)
+    Helps identify players who perform well when "stepping up"
+    """
+    recent = matches[:lookback]
+    wins_vs_strong = 0
+    matches_vs_strong = 0
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if opp_key and opp_key in player_data:
+            opp_elo = player_data[opp_key].get('elo', 1500)
+            if opp_elo >= strong_threshold:
+                matches_vs_strong += 1
+                if match.get('result') == 'W':
+                    wins_vs_strong += 1
+    
+    return {
+        'win_pct_vs_strong': wins_vs_strong / matches_vs_strong if matches_vs_strong > 0 else 0.5,
+        'matches_vs_strong': matches_vs_strong
+    }
+
+
+def calculate_elo_adjusted_form(matches, player_data, name_lookup, lookback=15):
+    """
+    Option 2: Opponent-adjusted form (weight wins by opponent ELO)
+    A win against 2100 ELO counts more than a win against 1400 ELO.
+    Prevents over-crediting players with easy recent draws.
+    """
+    recent = matches[:lookback]
+    weighted_wins = 0
+    total_weight = 0
+    opponent_elos = []
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if opp_key and opp_key in player_data:
+            opp_elo = player_data[opp_key].get('elo', 1500)
+            opponent_elos.append(opp_elo)
+            # Weight normalized around 1800 (roughly average top 200)
+            weight = opp_elo / 1800
+            total_weight += weight
+            if match.get('result') == 'W':
+                weighted_wins += weight
+    
+    return {
+        'adjusted_win_pct': weighted_wins / total_weight if total_weight > 0 else 0.5,
+        'avg_opponent_elo': np.mean(opponent_elos) if opponent_elos else 1700
+    }
+
+
+def calculate_level_jump(matches, player_data, name_lookup, current_opponent_elo, lookback=10):
+    """
+    Option 3: Level jump feature
+    Measures how much harder current opponent is vs recent opponents.
+    Positive = stepping up in competition
+    """
+    recent = matches[:lookback]
+    opponent_elos = []
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if opp_key and opp_key in player_data:
+            opp_elo = player_data[opp_key].get('elo', 1500)
+            opponent_elos.append(opp_elo)
+    
+    avg_recent_opp_elo = np.mean(opponent_elos) if opponent_elos else 1700
+    level_jump = current_opponent_elo - avg_recent_opp_elo
+    
+    return {
+        'level_jump': level_jump,
+        'level_jump_pct': level_jump / avg_recent_opp_elo if avg_recent_opp_elo > 0 else 0,
+        'avg_recent_opp_elo': avg_recent_opp_elo
+    }
+
+
+def calculate_performance_at_level(matches, player_data, name_lookup, target_elo, elo_range=100, lookback=25):
+    """
+    NEW: Performance at OPPONENT'S level
+    
+    Measures how a player performs against opponents near the current opponent's ELO.
+    E.g., if P1 (ELO 2100) faces P2 (ELO 1850):
+    - How does P1 perform against ~1850 ELO opponents?
+    - How does P2 perform against ~2100 ELO opponents?
+    
+    This directly answers: "Can the favorite dominate at this level?"
+    """
+    recent = matches[:lookback]
+    
+    wins = 0
+    matches_at_level = 0
+    spreads = []
+    serve_pcts = []
+    return_pcts = []
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if not opp_key or opp_key not in player_data:
+            continue
+        
+        opp_elo = player_data[opp_key].get('elo', 1500)
+        
+        # Check if opponent is near target level
+        if abs(opp_elo - target_elo) <= elo_range:
+            matches_at_level += 1
+            
+            if match.get('result') == 'W':
+                wins += 1
+            
+            # Parse spread from score
+            score = match.get('score', '')
+            if score:
+                sets = re.findall(r'(\d+)-(\d+)', score)
+                if sets:
+                    p1_games = sum(int(s[0]) for s in sets)
+                    p2_games = sum(int(s[1]) for s in sets)
+                    spreads.append(p1_games - p2_games)
+            
+            # Serve stats
+            serve = match.get('serve', {})
+            if serve:
+                fw = serve.get('first_won_pct') or 0
+                sw = serve.get('second_won_pct') or 0
+                if fw or sw:
+                    serve_pcts.append(fw * 0.6 + sw * 0.4)
+            
+            # Return stats
+            ret = match.get('return', {})
+            if ret and ret.get('rpw_pct'):
+                return_pcts.append(ret['rpw_pct'])
+    
+    return {
+        'win_pct_at_level': wins / matches_at_level if matches_at_level > 0 else 0.5,
+        'avg_spread_at_level': np.mean(spreads) if spreads else 0,
+        'serve_pct_at_level': np.mean(serve_pcts) if serve_pcts else 55,
+        'return_pct_at_level': np.mean(return_pcts) if return_pcts else 35,
+        'matches_at_level': matches_at_level
+    }
+
+
 def build_training_data(data):
     """Build training data for unified model - predicts spread AND total together"""
     
@@ -294,6 +447,18 @@ def build_training_data(data):
             tourn_level = get_tournament_level(match.get('tournament', ''))
             round_level = get_round_level(match.get('round', 'R32'))
             
+            # Calculate ELO-level adjusted features (NEW)
+            p1_vs_strong = calculate_vs_strong_opponents(hist, player_data, name_lookup)
+            p2_vs_strong = calculate_vs_strong_opponents(opp_hist, player_data, name_lookup)
+            p1_adj_form = calculate_elo_adjusted_form(hist, player_data, name_lookup)
+            p2_adj_form = calculate_elo_adjusted_form(opp_hist, player_data, name_lookup)
+            p1_level_jump = calculate_level_jump(hist, player_data, name_lookup, opp_data['elo'])
+            p2_level_jump = calculate_level_jump(opp_hist, player_data, name_lookup, pdata['elo'])
+            
+            # Calculate performance at OPPONENT'S level (NEW)
+            p1_at_level = calculate_performance_at_level(hist, player_data, name_lookup, opp_data['elo'])
+            p2_at_level = calculate_performance_at_level(opp_hist, player_data, name_lookup, pdata['elo'])
+            
             # === SPREAD FEATURES (differences - who wins by how much) ===
             spread_features = [
                 # ELO differences (2)
@@ -330,6 +495,26 @@ def build_training_data(data):
                 h2h['diff'],
                 h2h['win_pct'],
                 h2h['total'],
+                
+                # === NEW: ELO-LEVEL ADJUSTED FEATURES (6) ===
+                # Option 1: Performance vs strong opponents
+                p1_vs_strong['win_pct_vs_strong'] - p2_vs_strong['win_pct_vs_strong'],
+                p1_vs_strong['matches_vs_strong'] - p2_vs_strong['matches_vs_strong'],
+                
+                # Option 2: ELO-adjusted form (weights wins by opponent strength)
+                p1_adj_form['adjusted_win_pct'] - p2_adj_form['adjusted_win_pct'],
+                p1_adj_form['avg_opponent_elo'] - p2_adj_form['avg_opponent_elo'],
+                
+                # Option 3: Level jump (facing tougher competition than usual?)
+                p1_level_jump['level_jump'] - p2_level_jump['level_jump'],
+                p1_level_jump['level_jump_pct'] - p2_level_jump['level_jump_pct'],
+                
+                # === NEW: PERFORMANCE AT OPPONENT'S LEVEL (4) ===
+                # How does P1 perform vs players at P2's level? vs P2 vs players at P1's level?
+                p1_at_level['win_pct_at_level'] - p2_at_level['win_pct_at_level'],
+                p1_at_level['avg_spread_at_level'] - p2_at_level['avg_spread_at_level'],
+                p1_at_level['serve_pct_at_level'] - p2_at_level['serve_pct_at_level'],
+                p1_at_level['return_pct_at_level'] - p2_at_level['return_pct_at_level'],
             ]
             
             # === TOTAL GAMES FEATURES (combined - both players contribute) ===
@@ -574,6 +759,18 @@ class UnifiedPredictor:
         tourn_level = get_tournament_level(tournament)
         round_level = get_round_level(match_round)
         
+        # Calculate ELO-level adjusted features (NEW)
+        p1_vs_strong = calculate_vs_strong_opponents(p1_data['matches'], self.player_data, self.name_lookup)
+        p2_vs_strong = calculate_vs_strong_opponents(p2_data['matches'], self.player_data, self.name_lookup)
+        p1_adj_form = calculate_elo_adjusted_form(p1_data['matches'], self.player_data, self.name_lookup)
+        p2_adj_form = calculate_elo_adjusted_form(p2_data['matches'], self.player_data, self.name_lookup)
+        p1_level_jump = calculate_level_jump(p1_data['matches'], self.player_data, self.name_lookup, p2_data['elo'])
+        p2_level_jump = calculate_level_jump(p2_data['matches'], self.player_data, self.name_lookup, p1_data['elo'])
+        
+        # Calculate performance at OPPONENT'S level (NEW)
+        p1_at_level = calculate_performance_at_level(p1_data['matches'], self.player_data, self.name_lookup, p2_data['elo'])
+        p2_at_level = calculate_performance_at_level(p2_data['matches'], self.player_data, self.name_lookup, p1_data['elo'])
+        
         # === SPREAD FEATURES (differences) ===
         spread_features = [
             p1_data['elo'] - p2_data['elo'],
@@ -603,6 +800,20 @@ class UnifiedPredictor:
             h2h['diff'],
             h2h['win_pct'],
             h2h['total'],
+            
+            # === NEW: ELO-LEVEL ADJUSTED FEATURES (6) ===
+            p1_vs_strong['win_pct_vs_strong'] - p2_vs_strong['win_pct_vs_strong'],
+            p1_vs_strong['matches_vs_strong'] - p2_vs_strong['matches_vs_strong'],
+            p1_adj_form['adjusted_win_pct'] - p2_adj_form['adjusted_win_pct'],
+            p1_adj_form['avg_opponent_elo'] - p2_adj_form['avg_opponent_elo'],
+            p1_level_jump['level_jump'] - p2_level_jump['level_jump'],
+            p1_level_jump['level_jump_pct'] - p2_level_jump['level_jump_pct'],
+            
+            # === NEW: PERFORMANCE AT OPPONENT'S LEVEL (4) ===
+            p1_at_level['win_pct_at_level'] - p2_at_level['win_pct_at_level'],
+            p1_at_level['avg_spread_at_level'] - p2_at_level['avg_spread_at_level'],
+            p1_at_level['serve_pct_at_level'] - p2_at_level['serve_pct_at_level'],
+            p1_at_level['return_pct_at_level'] - p2_at_level['return_pct_at_level'],
         ]
         
         # === TOTAL GAMES FEATURES (combined) ===
