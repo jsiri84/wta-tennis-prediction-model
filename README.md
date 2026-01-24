@@ -4,9 +4,9 @@ A machine learning model for predicting WTA tennis match outcomes, game spreads,
 
 ## Features
 
-- **Winner Prediction**: Probability of each player winning (95.2% accuracy)
-- **Game Spread**: Predicted margin of victory (MAE: 2.03 games)
-- **Total Games**: Over/under prediction (74.1% accuracy at O/U 21.5)
+- **Winner Prediction**: Probability of each player winning (70.7% accuracy, 0.766 AUC-ROC)
+- **Game Spread**: Predicted margin of victory (MAE: 2.06 games)
+- **Total Games**: Over/under prediction (75.0% accuracy at O/U 21.5)
 - **Mathematically Consistent**: All predictions guaranteed to be internally consistent
 
 ## Quick Start
@@ -61,10 +61,11 @@ pip install numpy scikit-learn scipy joblib
 
 | Prediction | Metric | Value |
 |------------|--------|-------|
-| Winner | Accuracy | 95.2% |
-| Spread | MAE | 2.03 games |
-| Total Games | MAE | 3.47 games |
-| Total Games | O/U 21.5 | 74.1% |
+| Winner | Accuracy | 70.7% |
+| Winner | AUC-ROC | 0.766 |
+| Spread | MAE | 2.06 games |
+| Total Games | MAE | 3.55 games |
+| Total Games | O/U 21.5 | 75.0% |
 
 ## Data Source
 
