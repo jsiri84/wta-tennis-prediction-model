@@ -19,8 +19,8 @@ cache/
 # Individual player match files (regenerated from scraping)
 osaka_matches.json
 
-# Nested duplicate folder
-v2/
+# Temp files
+temp_*.py
 
 # IDE/editor files
 .vscode/
