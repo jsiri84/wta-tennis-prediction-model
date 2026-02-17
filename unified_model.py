@@ -365,6 +365,111 @@ def calculate_performance_at_level(matches, player_data, name_lookup, target_elo
     }
 
 
+def elo_expected_score(player_elo, opponent_elo):
+    """Calculate expected win probability (0-1) based on ELO difference"""
+    return 1 / (1 + 10 ** ((opponent_elo - player_elo) / 400))
+
+
+def calculate_form_vs_expected(matches, player_elo, player_surface_elo, player_data, name_lookup, surface, window=3):
+    """
+    NEW: Form vs Expected Performance
+    
+    Measures if a player is currently "hot" or "cold" relative to their ELO.
+    - Look at last 3 matches
+    - Calculate expected win probability based on ELO for each
+    - Compare actual wins to expected wins
+    - Positive = overperforming (hot), Negative = underperforming (cold)
+    """
+    recent = matches[:window]
+    if len(recent) < 2:
+        return None
+    
+    actual_wins = 0
+    expected_wins = 0
+    surface_actual = 0
+    surface_expected = 0
+    surface_matches = 0
+    actual_spreads = []
+    expected_spreads = []
+    
+    for match in recent:
+        opp_name = match.get('opponent', '')
+        opp_key = name_lookup.get(opp_name.lower()) or name_lookup.get(opp_name.lower().replace(' ', ''))
+        
+        if not opp_key or opp_key not in player_data:
+            continue
+        
+        opp_elo = player_data[opp_key].get('elo', 1500)
+        match_surface = match.get('surface', '').lower()
+        
+        # Expected win probability based on ELO
+        exp_win = elo_expected_score(player_elo, opp_elo)
+        expected_wins += exp_win
+        
+        # Actual result
+        won = match.get('result') == 'W'
+        if won:
+            actual_wins += 1
+        
+        # Surface-specific form
+        if match_surface == surface.lower():
+            surface_matches += 1
+            opp_surface_elo = player_data[opp_key].get(f'elo_{surface.lower()}', opp_elo)
+            surface_exp = elo_expected_score(player_surface_elo, opp_surface_elo)
+            surface_expected += surface_exp
+            if won:
+                surface_actual += 1
+        
+        # Spread analysis
+        score = match.get('score', '')
+        sets = re.findall(r'(\d+)-(\d+)', score)
+        if sets:
+            p1_games = sum(int(s[0]) for s in sets)
+            p2_games = sum(int(s[1]) for s in sets)
+            actual_spreads.append(p1_games - p2_games)
+            # Expected spread based on ELO (~1 game per 50 ELO)
+            elo_diff = player_elo - opp_elo
+            expected_spreads.append(elo_diff / 50)
+    
+    n = len(recent)
+    
+    # Win/loss streak
+    streak = 0
+    for m in recent:
+        if m.get('result') == 'W':
+            if streak >= 0:
+                streak += 1
+            else:
+                break
+        else:
+            if streak <= 0:
+                streak -= 1
+            else:
+                break
+    
+    # Form metrics
+    form_diff = actual_wins - expected_wins  # Positive = hot, negative = cold
+    
+    # Surface form
+    if surface_matches >= 2:
+        surface_form_diff = surface_actual - surface_expected
+    else:
+        surface_form_diff = form_diff * 0.5  # Fallback to overall
+    
+    # Spread form (winning by more/less than expected?)
+    if actual_spreads and expected_spreads:
+        spread_form_diff = np.mean(actual_spreads) - np.mean(expected_spreads)
+    else:
+        spread_form_diff = 0
+    
+    return {
+        'form_diff': form_diff,
+        'surface_form_diff': surface_form_diff,
+        'spread_form_diff': spread_form_diff,
+        'streak': streak,
+    }
+
+
 def build_training_data(data):
     """Build training data for unified model - predicts spread AND total together"""
     
@@ -459,6 +564,16 @@ def build_training_data(data):
             p1_at_level = calculate_performance_at_level(hist, player_data, name_lookup, opp_data['elo'])
             p2_at_level = calculate_performance_at_level(opp_hist, player_data, name_lookup, pdata['elo'])
             
+            # Calculate form vs expected (NEW - hot/cold detection)
+            p1_form_vs_exp = calculate_form_vs_expected(
+                hist, pdata['elo'], pdata.get(surface_key, 1500),
+                player_data, name_lookup, surface, window=3
+            )
+            p2_form_vs_exp = calculate_form_vs_expected(
+                opp_hist, opp_data['elo'], opp_data.get(surface_key, 1500),
+                player_data, name_lookup, surface, window=3
+            )
+            
             # === SPREAD FEATURES (differences - who wins by how much) ===
             spread_features = [
                 # ELO differences (2)
@@ -515,6 +630,13 @@ def build_training_data(data):
                 p1_at_level['avg_spread_at_level'] - p2_at_level['avg_spread_at_level'],
                 p1_at_level['serve_pct_at_level'] - p2_at_level['serve_pct_at_level'],
                 p1_at_level['return_pct_at_level'] - p2_at_level['return_pct_at_level'],
+                
+                # === NEW: FORM VS EXPECTED (4) ===
+                # Is player hot/cold relative to their ELO level?
+                (p1_form_vs_exp['form_diff'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['form_diff'] if p2_form_vs_exp else 0),
+                (p1_form_vs_exp['surface_form_diff'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['surface_form_diff'] if p2_form_vs_exp else 0),
+                (p1_form_vs_exp['spread_form_diff'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['spread_form_diff'] if p2_form_vs_exp else 0),
+                (p1_form_vs_exp['streak'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['streak'] if p2_form_vs_exp else 0),
             ]
             
             # === TOTAL GAMES FEATURES (combined - both players contribute) ===
@@ -585,6 +707,73 @@ class UnifiedPredictor:
     # Estimated prediction uncertainty (from validation)
     SPREAD_STD = 4.5  # Standard deviation of spread predictions
     TOTAL_STD = 3.5   # Standard deviation of total predictions
+    
+    # Feature names for explainability
+    SPREAD_FEATURE_NAMES = [
+        'ELO rating difference',
+        'Surface ELO difference',
+        'Historical spread difference',
+        'P1 average margin',
+        'P2 average margin',
+        'Combined spread volatility',
+        'Combined dominance margins',
+        'Win rate difference',
+        'Dominance ratio difference',
+        'Surface win rate difference',
+        'First serve points won difference',
+        'Ace rate difference',
+        'Second serve points won difference',
+        'Break points saved difference',
+        'Return points won difference',
+        'Break point conversion difference',
+        'Straight sets rate difference',
+        'Win rate gap (absolute)',
+        'Head-to-head record',
+        'Head-to-head win rate',
+        'Head-to-head matches played',
+        'Win rate vs strong opponents',
+        'Experience vs strong opponents',
+        'ELO-adjusted win rate',
+        'Average opponent strength difference',
+        'Competition level jump',
+        'Competition level jump %',
+        'Win rate at opponent level',
+        'Spread at opponent level',
+        'Serve % at opponent level',
+        'Return % at opponent level',
+        'Recent form vs expected',
+        'Surface form vs expected',
+        'Spread form vs expected',
+        'Winning/losing streak',
+    ]
+    
+    TOTAL_FEATURE_NAMES = [
+        'ELO gap (closer = more games)',
+        'Surface ELO gap',
+        'Match quality (combined ELO)',
+        'Combined average total',
+        'P1 average total',
+        'P2 average total',
+        'Total games volatility',
+        'Max total tendency',
+        'Three-set match rate',
+        'Straight sets rate',
+        'Tiebreak frequency',
+        'Win rate gap',
+        'Service hold rate',
+        'First serve strength',
+        'Ace tendency',
+        'Break point defense',
+        'Break frequency',
+        'Return strength',
+        'Break point conversion',
+        'Tournament level',
+        'Round importance',
+        'Tournament x Round',
+        'Hard court',
+        'Clay court',
+        'Grass court',
+    ]
     
     def __init__(self):
         self.spread_model = None
@@ -723,6 +912,240 @@ class UnifiedPredictor:
                 return v
         return None
     
+    def _get_top_factors(self, features, model, feature_names, p1_name, p2_name, 
+                         prediction_type='spread', n_factors=3):
+        """
+        Calculate top contributing factors for a prediction.
+        
+        Uses feature importance from GradientBoosting combined with feature values.
+        """
+        importances = model.feature_importances_
+        
+        # Calculate contribution: importance * |normalized_value|
+        # Features with high importance AND extreme values matter most
+        features_arr = np.array(features)
+        
+        # Use absolute values for contribution calculation
+        contributions = []
+        for i, (feat_val, imp, name) in enumerate(zip(features_arr, importances, feature_names)):
+            # Skip features with near-zero importance
+            if imp < 0.01:
+                continue
+            
+            # Contribution = importance * how extreme the value is
+            contribution = imp * abs(feat_val) if feat_val != 0 else 0
+            
+            # Determine direction/interpretation
+            if prediction_type == 'spread':
+                if feat_val > 0:
+                    direction = f"favors {p1_name}"
+                elif feat_val < 0:
+                    direction = f"favors {p2_name}"
+                else:
+                    direction = "neutral"
+            else:  # total
+                if 'gap' in name.lower() or 'volatility' in name.lower():
+                    direction = "more games" if feat_val > 0 else "fewer games"
+                else:
+                    direction = "higher" if feat_val > 0 else "lower"
+            
+            contributions.append({
+                'factor': name,
+                'value': feat_val,
+                'importance': imp,
+                'contribution': contribution,
+                'direction': direction,
+            })
+        
+        # Sort by contribution (importance * value magnitude)
+        contributions.sort(key=lambda x: x['contribution'], reverse=True)
+        
+        # Return top N factors with human-readable explanations
+        top_factors = []
+        for c in contributions[:n_factors]:
+            explanation = self._format_factor_explanation(c, p1_name, p2_name)
+            top_factors.append({
+                'factor': c['factor'],
+                'explanation': explanation,
+                'importance': round(c['importance'] * 100, 1),
+            })
+        
+        return top_factors
+    
+    def _format_factor_explanation(self, factor, p1_name, p2_name):
+        """Format a factor into a human-readable explanation."""
+        name = factor['factor']
+        val = factor['value']
+        
+        # ELO-based factors
+        if 'ELO' in name:
+            diff = abs(val)
+            if 'rating difference' in name or name == 'ELO rating difference':
+                if val > 0:
+                    return f"{p1_name} is rated {diff:.0f} ELO higher"
+                else:
+                    return f"{p2_name} is rated {diff:.0f} ELO higher"
+            elif 'Surface' in name and 'gap' not in name.lower():
+                if val > 0:
+                    return f"{p1_name} has +{diff:.0f} surface ELO advantage"
+                else:
+                    return f"{p2_name} has +{diff:.0f} surface ELO advantage"
+            elif 'gap' in name.lower():
+                return f"ELO gap of {diff:.0f} suggests {'competitive match (more games)' if diff < 100 else 'one-sided match (fewer games)'}"
+            elif 'quality' in name.lower():
+                return f"High-level matchup (avg ELO {val:.0f}) tends to go longer"
+        
+        # H2H factors
+        if 'Head-to-head' in name:
+            if 'record' in name:
+                if val > 0:
+                    return f"{p1_name} has winning H2H record"
+                elif val < 0:
+                    return f"{p2_name} has winning H2H record"
+                else:
+                    return "Even head-to-head record"
+            elif 'matches' in name:
+                return f"{abs(val):.0f} previous meetings"
+        
+        # Serve/return factors
+        if 'serve' in name.lower() or 'ace' in name.lower():
+            better = p1_name if val > 0 else p2_name
+            return f"{better} has stronger serve stats"
+        
+        if 'return' in name.lower() or 'break' in name.lower():
+            better = p1_name if val > 0 else p2_name
+            return f"{better} has better return/break stats"
+        
+        # Form factors
+        if 'form' in name.lower() or 'streak' in name.lower():
+            if val > 0:
+                return f"{p1_name} in better recent form"
+            elif val < 0:
+                return f"{p2_name} in better recent form"
+            else:
+                return "Similar recent form"
+        
+        # Win rate factors
+        if 'win rate' in name.lower() or 'Win rate' in name:
+            diff = abs(val) * 100
+            better = p1_name if val > 0 else p2_name
+            return f"{better} has {diff:.0f}% higher win rate"
+        
+        # Match length factors
+        if 'Three-set' in name or 'tiebreak' in name.lower():
+            if val > 0.4:
+                return f"Both players have frequent 3-setters/tiebreaks (more games)"
+            else:
+                return f"Players typically finish in straight sets (fewer games)"
+        
+        if 'total' in name.lower() and ('average' in name.lower() or 'Combined' in name):
+            return f"Players average {val:.0f} games per match combined"
+        
+        if 'P1 average total' in name or 'P2 average total' in name:
+            return f"Player averages {val:.1f} games per match"
+        
+        if 'Max total' in name:
+            return f"Match could extend to {val:.0f}+ games"
+        
+        # Service strength for totals
+        if 'Service hold' in name or 'hold rate' in name.lower():
+            if val > 0.7:
+                return f"Strong service holds - fewer break opportunities"
+            else:
+                return f"Breakable serves - more game exchanges"
+        
+        # Combined serve/return for totals
+        if 'First serve strength' in name:
+            return f"Combined first serve strength affects game length"
+        
+        if 'Break frequency' in name:
+            if val > 0.3:
+                return f"High break rate - more game turnover"
+            else:
+                return f"Low break rate - service dominance"
+        
+        # Dominance factors
+        if 'dominance' in name.lower() or 'margin' in name.lower():
+            better = p1_name if val > 0 else p2_name
+            return f"{better} wins more decisively"
+        
+        # Default
+        if val > 0:
+            return f"{name}: {p1_name} advantage (+{val:.2f})"
+        elif val < 0:
+            return f"{name}: {p2_name} advantage ({val:.2f})"
+        else:
+            return f"{name}: Even"
+    
+    def _get_winner_factors(self, p1_name, p2_name, p1_data, p2_data, p1, p2, h2h, surface_key, win_prob):
+        """Get top factors explaining the winner prediction."""
+        factors = []
+        
+        # ELO difference
+        elo_diff = p1_data['elo'] - p2_data['elo']
+        if abs(elo_diff) >= 50:
+            better = p1_name if elo_diff > 0 else p2_name
+            factors.append({
+                'factor': 'ELO Rating',
+                'explanation': f"{better} rated {abs(elo_diff):.0f} points higher ({max(p1_data['elo'], p2_data['elo']):.0f} vs {min(p1_data['elo'], p2_data['elo']):.0f})",
+                'importance': min(40, abs(elo_diff) / 5),
+            })
+        
+        # Surface ELO
+        surf_diff = p1_data.get(surface_key, 1500) - p2_data.get(surface_key, 1500)
+        if abs(surf_diff) >= 30 and abs(surf_diff - elo_diff) >= 20:
+            better = p1_name if surf_diff > 0 else p2_name
+            factors.append({
+                'factor': 'Surface Specialist',
+                'explanation': f"{better} has +{abs(surf_diff):.0f} surface ELO advantage",
+                'importance': min(25, abs(surf_diff) / 4),
+            })
+        
+        # H2H
+        if h2h['total'] >= 2:
+            h2h_diff = h2h['wins'] - h2h['losses']
+            if h2h_diff != 0:
+                better = p1_name if h2h_diff > 0 else p2_name
+                factors.append({
+                    'factor': 'Head-to-Head',
+                    'explanation': f"{better} leads H2H {max(h2h['wins'], h2h['losses'])}-{min(h2h['wins'], h2h['losses'])}",
+                    'importance': min(20, h2h['total'] * 5),
+                })
+        
+        # Win percentage
+        win_pct_diff = (p1['win_pct'] - p2['win_pct']) * 100
+        if abs(win_pct_diff) >= 10:
+            better = p1_name if win_pct_diff > 0 else p2_name
+            factors.append({
+                'factor': 'Recent Win Rate',
+                'explanation': f"{better} winning {max(p1['win_pct'], p2['win_pct'])*100:.0f}% vs {min(p1['win_pct'], p2['win_pct'])*100:.0f}%",
+                'importance': min(15, abs(win_pct_diff) / 2),
+            })
+        
+        # Serve strength
+        serve_diff = (p1['first_won_pct'] - p2['first_won_pct'])
+        if abs(serve_diff) >= 3:
+            better = p1_name if serve_diff > 0 else p2_name
+            factors.append({
+                'factor': 'Serve Advantage',
+                'explanation': f"{better} wins {abs(serve_diff):.0f}% more first serve points",
+                'importance': min(15, abs(serve_diff) * 2),
+            })
+        
+        # Return strength
+        return_diff = (p1['rpw_pct'] - p2['rpw_pct'])
+        if abs(return_diff) >= 3:
+            better = p1_name if return_diff > 0 else p2_name
+            factors.append({
+                'factor': 'Return Advantage', 
+                'explanation': f"{better} wins {abs(return_diff):.0f}% more return points",
+                'importance': min(15, abs(return_diff) * 2),
+            })
+        
+        # Sort by importance and return top 3
+        factors.sort(key=lambda x: x['importance'], reverse=True)
+        return factors[:3]
+    
     def predict(self, player1: str, player2: str, surface: str = 'Hard',
                 tournament: str = '', match_round: str = 'R32'):
         """
@@ -771,6 +1194,16 @@ class UnifiedPredictor:
         p1_at_level = calculate_performance_at_level(p1_data['matches'], self.player_data, self.name_lookup, p2_data['elo'])
         p2_at_level = calculate_performance_at_level(p2_data['matches'], self.player_data, self.name_lookup, p1_data['elo'])
         
+        # Calculate form vs expected (NEW - hot/cold detection)
+        p1_form_vs_exp = calculate_form_vs_expected(
+            p1_data['matches'], p1_data['elo'], p1_data.get(surface_key, 1500),
+            self.player_data, self.name_lookup, surface, window=3
+        )
+        p2_form_vs_exp = calculate_form_vs_expected(
+            p2_data['matches'], p2_data['elo'], p2_data.get(surface_key, 1500),
+            self.player_data, self.name_lookup, surface, window=3
+        )
+        
         # === SPREAD FEATURES (differences) ===
         spread_features = [
             p1_data['elo'] - p2_data['elo'],
@@ -814,6 +1247,13 @@ class UnifiedPredictor:
             p1_at_level['avg_spread_at_level'] - p2_at_level['avg_spread_at_level'],
             p1_at_level['serve_pct_at_level'] - p2_at_level['serve_pct_at_level'],
             p1_at_level['return_pct_at_level'] - p2_at_level['return_pct_at_level'],
+            
+            # === NEW: FORM VS EXPECTED (4) ===
+            # Is player hot/cold relative to their ELO level?
+            (p1_form_vs_exp['form_diff'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['form_diff'] if p2_form_vs_exp else 0),
+            (p1_form_vs_exp['surface_form_diff'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['surface_form_diff'] if p2_form_vs_exp else 0),
+            (p1_form_vs_exp['spread_form_diff'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['spread_form_diff'] if p2_form_vs_exp else 0),
+            (p1_form_vs_exp['streak'] if p1_form_vs_exp else 0) - (p2_form_vs_exp['streak'] if p2_form_vs_exp else 0),
         ]
         
         # === TOTAL GAMES FEATURES (combined) ===
@@ -865,11 +1305,43 @@ class UnifiedPredictor:
         winner_result = self.winner_predictor.predict(player1, player2, surface)
         win_prob = winner_result['player1']['win_prob'] / 100.0
         
+        # === SPREAD SCALING (WTA Best-of-3) ===
+        # In best-of-3, spreads are compressed because:
+        # - 3-setters have small spreads (1-4 games typically)
+        # - Even dominant wins are capped (6-0, 6-0 = 12 game spread max)
+        #
+        # Realistic WTA spreads:
+        #   50% -> ~1-2 games (likely 3-setter)
+        #   60% -> ~2-3 games (could go 3 sets)
+        #   70% -> ~3-4 games (straight sets likely)
+        #   80% -> ~4-5 games (comfortable straight sets)
+        #   90% -> ~5-6 games (dominant straight sets)
+        
+        fav_prob = max(win_prob, 1 - win_prob)
+        
+        # Factor in three-set likelihood - closer matches go 3 sets more often
+        # Probability of 3-setter roughly correlates with match closeness
+        three_set_prob = 1 - abs(fav_prob - 0.5) * 2  # ~0 for 100%, ~1 for 50%
+        
+        # Base spread from probability
+        # Lower base because of 3-set possibility
+        base_spread = 1.0 + 8.0 * (fav_prob - 0.5)  # 1 to 5 for 50% to 90%
+        
+        # Reduce spread when 3-setter is likely
+        # 3-setters average ~3 game spread, 2-setters average ~5
+        three_set_discount = three_set_prob * 1.5  # Up to 1.5 game reduction
+        
+        scaled_spread = base_spread - three_set_discount
+        scaled_spread = max(scaled_spread, 1.0)  # Minimum 1 game spread
+        
+        # Blend with model (model is trained on actual data)
+        blended_spread = 0.5 * abs(raw_spread) + 0.5 * scaled_spread
+        
         # Apply consistency constraint:
         # loser_games = (total - |spread|) / 2 must be >= 0
         # winner_games = (total + |spread|) / 2 must be >= 12 (typical minimum)
         
-        abs_spread = abs(raw_spread)
+        abs_spread = blended_spread
         
         # Ensure total is large enough for the spread
         min_total = abs_spread + 1  # At least 1 game for loser (avoid 0)
@@ -908,6 +1380,21 @@ class UnifiedPredictor:
         p1_decimal = round(1 / win_prob, 2) if win_prob > 0 else 99.99
         p2_decimal = round(1 / (1 - win_prob), 2) if win_prob < 1 else 99.99
         
+        # === CALCULATE TOP FACTORS FOR EXPLANATION ===
+        spread_factors = self._get_top_factors(
+            spread_features, self.spread_model, self.SPREAD_FEATURE_NAMES,
+            p1_name, p2_name, prediction_type='spread'
+        )
+        total_factors = self._get_top_factors(
+            total_features, self.total_model, self.TOTAL_FEATURE_NAMES,
+            p1_name, p2_name, prediction_type='total'
+        )
+        
+        # Winner explanation combines ELO and key stats
+        winner_factors = self._get_winner_factors(
+            p1_name, p2_name, p1_data, p2_data, p1, p2, h2h, surface_key, win_prob
+        )
+        
         return {
             'player1': p1_name,
             'player2': p2_name,
@@ -933,10 +1420,11 @@ class UnifiedPredictor:
             # H2H
             'h2h': f"{h2h['wins']}-{h2h['losses']}" if h2h['total'] > 0 else "No previous meetings",
             
-            # Spread (P1 perspective)
-            'spread': round(raw_spread, 1),
-            'spread_favors': p1_name if raw_spread > 0 else p2_name,
-            'spread_line': round(abs(raw_spread), 1),
+            # Spread - aligned with winner prediction for consistency
+            # Use magnitude from spread model, direction from winner model
+            'spread': round(abs_spread, 1) if win_prob > 0.5 else round(-abs_spread, 1),
+            'spread_favors': p1_name if win_prob > 0.5 else p2_name,
+            'spread_line': round(abs_spread, 1),
             
             # Total games
             'total': round(adjusted_total, 1),
@@ -949,11 +1437,16 @@ class UnifiedPredictor:
             # Model uncertainty
             'spread_std': self.SPREAD_STD,
             'total_std': self.TOTAL_STD,
+            
+            # Explanations
+            'winner_factors': winner_factors,
+            'spread_factors': spread_factors,
+            'total_factors': total_factors,
         }
     
     def print_prediction(self, player1: str, player2: str, surface: str = 'Hard',
-                         tournament: str = '', match_round: str = 'R32'):
-        """Print formatted prediction"""
+                         tournament: str = '', match_round: str = 'R32', show_factors: bool = True):
+        """Print formatted prediction with optional factor explanations"""
         
         result = self.predict(player1, player2, surface, tournament, match_round)
         
@@ -979,12 +1472,24 @@ class UnifiedPredictor:
         print(f"\n  ELO: {result['player1']} {result['p1_elo']} | {result['player2']} {result['p2_elo']} (diff: {result['elo_diff']:+d})")
         print(f"  Surface ELO: {result['player1']} {result['p1_surface_elo']} | {result['player2']} {result['p2_surface_elo']}")
         
+        # Winner factors
+        if show_factors and result.get('winner_factors'):
+            print(f"\n  TOP FACTORS:")
+            for i, f in enumerate(result['winner_factors'], 1):
+                print(f"    {i}. {f['explanation']}")
+        
         # Spread
         print(f"\n{'-'*70}")
         print("GAME SPREAD")
         print(f"{'-'*70}")
         print(f"  {result['spread_favors']} -{result['spread_line']}")
         print(f"  (Model predicts {result['spread_favors']} wins by ~{result['spread_line']:.0f} games)")
+        
+        # Spread factors
+        if show_factors and result.get('spread_factors'):
+            print(f"\n  TOP FACTORS:")
+            for i, f in enumerate(result['spread_factors'], 1):
+                print(f"    {i}. {f['explanation']}")
         
         # Total games
         print(f"\n{'-'*70}")
@@ -1001,6 +1506,12 @@ class UnifiedPredictor:
         likely = self._suggest_scorelines(result['winner_games'], result['loser_games'])
         if likely:
             print(f"  Likely scorelines: {', '.join(likely)}")
+        
+        # Total factors
+        if show_factors and result.get('total_factors'):
+            print(f"\n  TOP FACTORS:")
+            for i, f in enumerate(result['total_factors'], 1):
+                print(f"    {i}. {f['explanation']}")
         
         # Consistency check
         print(f"\n{'-'*70}")

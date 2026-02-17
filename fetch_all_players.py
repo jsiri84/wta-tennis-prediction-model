@@ -1,9 +1,11 @@
-"""Fetch match stats for all 200 WTA players from Tennis Abstract"""
+"""Fetch match stats for WTA players from Tennis Abstract (threaded)"""
 
 import json
-import time
 import re
+import argparse
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from fetch_match_stats import fetch_player_matches, format_matches
 
 
@@ -41,15 +43,57 @@ def has_valid_stats(match: dict) -> bool:
     return True
 
 
-def fetch_all_players(max_matches_per_player: int = 52):
-    """Fetch matches for all players in the Elo dataset"""
+def fetch_single_player(player: dict, max_matches: int) -> tuple[str, dict | None, str | None]:
+    """Fetch matches for a single player. Returns (name, data, error)"""
+    name = player['name']
+    url_key = name_to_url_key(name)
+    
+    try:
+        # Fetch raw matches
+        raw_matches = fetch_player_matches(url_key, max_matches)
+        
+        if not raw_matches:
+            return (name, None, "No matches found")
+        
+        # Format and filter
+        formatted = format_matches(raw_matches)
+        valid_matches = [m for m in formatted if has_valid_stats(m)]
+        
+        # Remove raw_js from final output to save space
+        for m in valid_matches:
+            if 'raw_js' in m:
+                del m['raw_js']
+        
+        player_data = {
+            "elo_rank": player['elo_rank'],
+            "elo_overall": player['elo_overall'],
+            "elo_hard": player['elo_hard'],
+            "elo_clay": player['elo_clay'],
+            "elo_grass": player['elo_grass'],
+            "wta_rank": player['wta_rank'],
+            "matches": valid_matches,
+            "match_count": len(valid_matches)
+        }
+        
+        return (name, player_data, None)
+        
+    except Exception as e:
+        return (name, None, str(e))
+
+
+def fetch_all_players(num_players: int = 200, max_matches_per_player: int = 52, num_threads: int = 10):
+    """Fetch matches for top N players in the Elo dataset using threading"""
     
     # Load player list
     with open('tennis_abstract_elo.json', 'r') as f:
         elo_data = json.load(f)
     
-    players = elo_data['players']
-    print(f"Found {len(players)} players to fetch")
+    all_players = elo_data['players']
+    players = all_players[:num_players]
+    
+    print(f"Fetching top {len(players)} players (of {len(all_players)} available)")
+    print(f"Using {num_threads} threads, {max_matches_per_player} matches per player")
+    print()
     
     all_data = {
         "fetched_at": datetime.now().isoformat(),
@@ -59,54 +103,43 @@ def fetch_all_players(max_matches_per_player: int = 52):
     }
     
     failed = []
+    completed = 0
+    lock = Lock()
     
-    for i, player in enumerate(players):
-        name = player['name']
-        url_key = name_to_url_key(name)
+    def progress_callback(name: str, match_count: int | None, error: str | None):
+        nonlocal completed
+        with lock:
+            completed += 1
+            if error:
+                status = f"ERROR: {error}"
+            elif match_count is not None:
+                status = f"{match_count} valid matches"
+            else:
+                status = "No matches"
+            print(f"[{completed}/{len(players)}] {name}... {status}")
+    
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # Submit all tasks
+        futures = {
+            executor.submit(fetch_single_player, player, max_matches_per_player): player
+            for player in players
+        }
         
-        print(f"[{i+1}/{len(players)}] Fetching {name}...", end=" ", flush=True)
-        
-        try:
-            # Fetch raw matches
-            raw_matches = fetch_player_matches(url_key, max_matches_per_player)
+        # Process results as they complete
+        for future in as_completed(futures):
+            name, player_data, error = future.result()
             
-            if not raw_matches:
-                print(f"No matches found")
+            if error:
                 failed.append(name)
-                continue
-            
-            # Format and filter
-            formatted = format_matches(raw_matches)
-            valid_matches = [m for m in formatted if has_valid_stats(m)]
-            
-            # Remove raw_js from final output to save space
-            for m in valid_matches:
-                if 'raw_js' in m:
-                    del m['raw_js']
-            
-            all_data['players'][name] = {
-                "elo_rank": player['elo_rank'],
-                "elo_overall": player['elo_overall'],
-                "elo_hard": player['elo_hard'],
-                "elo_clay": player['elo_clay'],
-                "elo_grass": player['elo_grass'],
-                "wta_rank": player['wta_rank'],
-                "matches": valid_matches,
-                "match_count": len(valid_matches)
-            }
-            
-            all_data['player_count'] += 1
-            all_data['total_matches'] += len(valid_matches)
-            
-            print(f"{len(valid_matches)} valid matches")
-            
-            # Rate limit - be nice to the server
-            time.sleep(0.5)
-            
-        except Exception as e:
-            print(f"ERROR: {e}")
-            failed.append(name)
-            continue
+                progress_callback(name, None, error)
+            elif player_data:
+                all_data['players'][name] = player_data
+                all_data['player_count'] += 1
+                all_data['total_matches'] += player_data['match_count']
+                progress_callback(name, player_data['match_count'], None)
+            else:
+                failed.append(name)
+                progress_callback(name, None, "No data")
     
     # Save results
     output_file = 'all_players_matches.json'
@@ -123,7 +156,23 @@ def fetch_all_players(max_matches_per_player: int = 52):
         print(f"\nFailed players ({len(failed)}):")
         for name in failed:
             print(f"  - {name}")
+    
+    return all_data
 
 
 if __name__ == '__main__':
-    fetch_all_players(52)
+    parser = argparse.ArgumentParser(description='Fetch WTA player match data from Tennis Abstract')
+    parser.add_argument('-n', '--num-players', type=int, default=200,
+                        help='Number of top players to fetch (default: 200)')
+    parser.add_argument('-m', '--max-matches', type=int, default=52,
+                        help='Max matches per player (default: 52)')
+    parser.add_argument('-t', '--threads', type=int, default=10,
+                        help='Number of threads (default: 10)')
+    
+    args = parser.parse_args()
+    
+    fetch_all_players(
+        num_players=args.num_players,
+        max_matches_per_player=args.max_matches,
+        num_threads=args.threads
+    )
